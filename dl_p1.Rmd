@@ -1,0 +1,308 @@
+---
+title: "Deep Learning Autoencoders (Part 1)"
+subtitle: "R for Pleasure"
+author: "Nguyen Chi Dung"
+output:
+  tufte::tufte_html: default
+  tufte::tufte_handout:
+    citation_package: natbib
+    latex_engine: xelatex
+  tufte::tufte_book:
+    citation_package: natbib
+    latex_engine: xelatex
+bibliography: skeleton.bib
+link-citations: yes
+---
+
+```{r setup, include=FALSE}
+library(tufte)
+# invalidate cache when the tufte version changes
+knitr::opts_chunk$set(tidy = FALSE, cache.extra = packageVersion('tufte'), warning = FALSE, message = FALSE)
+options(htmltools.dir.version = FALSE)
+```
+
+
+# Sơ qua về Deep Learning với h2o cho bài toán phân loại
+
+Để sử dụng h2o cho bài toán phân loại thì biến được phân loại phải ở dạng factor. Nếu không thì h2o sẽ hiểu thành bài toán hồi quy. 
+
+Vì lí do đó, ta chuẩn bị trước số liệu như sau: 
+
+```{r}
+# Load dữ liệu: 
+
+rm(list = ls())
+library(tidyverse)
+library(magrittr)
+
+hmeq <- read.csv("D:/Teaching/data_science_banking/hmeq/hmeq.csv")
+
+# Viết một số hàm xử lí số liệu thiếu và dán lại nhãn: 
+thay_na_mean <- function(x) {
+  tb <- mean(x, na.rm = TRUE)
+  x[is.na(x)] <- tb
+  return(x)
+}
+
+
+name_job <- function(x) {
+  x %<>% as.character()
+  ELSE <- TRUE
+  quan_tam <- c("Mgr", "Office", "Other", "ProfExe", "Sales", "Self")
+  case_when(!x %in% quan_tam ~ "Other", 
+            ELSE ~ x)
+}
+
+
+name_reason <- function(x) {
+  ELSE <- TRUE
+  x %<>% as.character()
+  case_when(!x %in% c("DebtCon", "HomeImp") ~ "Unknown", 
+            ELSE ~ x)
+}
+
+label_rename <- function(x) {
+  case_when(x == 1 ~ "BAD", 
+            x == 0 ~ "GOOD")
+}
+
+
+my_scale01 <- function(x) {
+  (x - min(x)) / (max(x) - min(x))
+}
+
+# Xử lí số liệu thiếu và dán nhãn lại: 
+df <- hmeq %>% 
+  mutate_if(is.numeric, thay_na_mean) %>% 
+  mutate_at("REASON", name_reason) %>% 
+  mutate_at("JOB", name_job) %>% 
+  mutate(BAD = label_rename(BAD)) %>% 
+  mutate_if(is.character, as.factor) %>% 
+  mutate_if(is.numeric, my_scale01)
+```
+
+Kế tiếp chuyển hóa Data Frame về h2o Frame đồng thời phân chia dữ liệu: 
+
+```{r}
+# Load gói h2o và thiết lập môi trường cho ML: 
+library(h2o)
+h2o.init(nthreads = 6, max_mem_size = "10g")
+
+# Tên của output (biến được phân loại) và các cột biến input: 
+
+response <- "BAD"
+features  <- setdiff(names(df), response)
+
+# CHuyển hóa về h2o frame: 
+
+data_h2o <- df %>% as.h2o()
+
+# Sử dụng 50% dữ liệu để huấn luyện mô hình. Phần còn lại để test: 
+splits <- h2o.splitFrame(data_h2o, 
+                         ratios = 0.5, 
+                         seed = 29)
+
+# Dữ liệu huấn luyện và kiểm định: 
+train <- splits[[1]]
+test <- splits[[2]]
+```
+
+# Sơ lược về cú pháp huấn luyện mô hình Deep Learning với h2o
+
+Cần lưu ý: 
+
+1. Mặc định thì *hidden = c(200, 200)* với hàm ý rằng chúng ta sử dụng chỉ hai layers, mỗi layer có 200 neutrons. Nhưng để minh họa chúng ta sử dụng hidden = c(100, 100) cho nhanh với cái giá phải trả là mức chính xác có thể giảm xuống. 
+
+2. Mô hình DL sẽ tự động suy đoán phân phối của biến response. Có thể sử dụng *distribution* để chỉ thị rõ phân phối là gì. 
+
+3. Để tái tạo lại kết quả có thể sử dụng *reproducible = TRUE* đối  với máy tính có nhiều nhân với cái giá phải trả là thời gian thực thi lâu. 
+
+4. Sử dụng *epochs = 50* (mặc định là 10). Tăng thì accuracy có thể tăng nhưng rủi ro gắn liền là overfitting. 
+
+5. Còn nhiều Options nữa và chúng ta sẽ tìm hiểu dần qua từng model với độ phức tạp tăng dần. 
+
+Dưới đây chúng ta chạy DL thứ nhất: 
+
+```{r}
+dl_fit1 <- h2o.deeplearning(x = features,
+                            y = response,
+                            training_frame = train,
+                            model_id = "dl_fit1",
+                            hidden = c(100, 100),
+                            reproducible = TRUE, 
+                            # Để chỉ ra rằng dữ liệu là không cân bằng: 
+                            balance_classes = FALSE, 
+                            # Tiêu chí tinh chỉnh: 
+                            stopping_metric = "AUC", 
+                            # Lựa chọn cross - validation: 
+                            nfolds = 10, 
+                            seed = 1)
+```
+
+
+Mô hình thứ hai: 
+
+```{r}
+dl_fit2 <- h2o.deeplearning(x = features,
+                            y = response,
+                            training_frame = train,
+                            model_id = "dl_fit2",
+                            hidden = c(100, 100),
+                            reproducible = TRUE, 
+                            balance_classes = FALSE, 
+                            stopping_metric = "AUC", 
+                            nfolds = 10, 
+                            # Dừng chế độ early stopping: 
+                            stopping_rounds = 0, 
+                            epochs = 50, 
+                            seed = 1)
+```
+
+
+Mô hình thứ ba sử dụng *stopping_rounds = 5* để tìm epochs tối ưu: 
+
+```{r}
+dl_fit3 <- h2o.deeplearning(x = features,
+                            y = response,
+                            training_frame = train,
+                            model_id = "dl_fit3",
+                            hidden = c(100, 100),
+                            reproducible = TRUE, 
+                            balance_classes = FALSE, 
+                            stopping_metric = "AUC", 
+                            nfolds = 10, 
+                            stopping_rounds = 5, 
+                            stopping_tolerance = 1e-3, 
+                            score_interval = 1, 
+                            epochs = 50, 
+                            seed = 1)
+```
+
+Đánh giá sơ bộ các mô hình và nhận thấy rằng Model thứ hai phân loại tốt nhất hồ sơ xấu: 
+
+```{r}
+lapply(list(dl_fit1, dl_fit2, dl_fit3), h2o.confusionMatrix)
+```
+
+Viết hàm khai thác các kết quả từ Cross - Validation: 
+
+```{r}
+results_df <- function(h2o_model) {
+  h2o_model@model$cross_validation_metrics_summary %>% 
+    as.data.frame() %>% 
+    select(-mean, -sd) %>% 
+    t() %>% 
+    as.data.frame() %>% 
+    mutate_all(as.character) %>% 
+    mutate_all(as.numeric) -> k
+  
+  k %>% 
+    select(Accuracy = accuracy, 
+           AUC = auc, 
+           Precision = precision, 
+           Specificity = specificity, 
+           Recall = recall, 
+           Logloss = logloss) %>% 
+    return()
+}
+```
+
+Sử dụng hàm cho Model thứ hai: 
+
+```{r}
+list(dl_fit1, dl_fit2, dl_fit3) %>% 
+  lapply(results_df) %>%  
+  lapply(summary)
+```
+
+
+Viết hàm tính Confusion Matrix: 
+
+```{r}
+# Viết hàm tạo Confusion Matrix: 
+
+library(caret)
+my_confusion_matrix <- function(h2o_model, data, thre) {
+  du_bao <- h2o.predict(h2o_model, data, type = "prob") %>% 
+    as.data.frame() %>% 
+    pull(BAD)
+  
+  du_bao <- case_when(du_bao >= thre ~ "BAD", 
+                      du_bao <= thre ~ "GOOD")
+  confusionMatrix(data %>% 
+                    as.data.frame() %>% 
+                    pull(BAD), 
+                  du_bao %>% as.factor(), 
+                  positive = "BAD")
+}
+```
+
+Mô hình thứ nhất với một loạt các ngưỡng: 
+
+```{r}
+lapply(seq(0.2, 0.6, by = 0.1), 
+       function(x) {my_confusion_matrix(dl_fit1, test, x)})
+```
+
+Tương tự: 
+
+```{r}
+lapply(seq(0.1, 0.6, by = 0.05), 
+       function(x) {my_confusion_matrix(dl_fit2, test, x)})
+```
+
+# Tinh chỉnh mô hình
+
+
+```{r}
+
+# Thiết lập một loạt các tham số tinh chỉnh: 
+hyper_params <- list(activation = c("Rectifier", "Maxout", "Tanh"), 
+                     l1 = c(0, 1 / 10^((2:5))), 
+                     l2 = c(0, 1 / 10^((2:5))))
+
+search_criteria <- list(strategy = "RandomDiscrete",
+                        max_runtime_secs = 1200)
+
+# Tinh chỉnh mô hình với một loạt các tham số trên: 
+dl_grid <- h2o.grid("deeplearning", 
+                    x = features,
+                    y = response,
+                    training_frame = train, 
+                    validation_frame = test, 
+                    grid_id = "dl_grid",
+                    hidden = c(100, 100),
+                    reproducible = TRUE,
+                    balance_classes = FALSE,
+                    stopping_metric = "AUC",
+                    nfolds = 10,
+                    stopping_rounds = 5,
+                    epochs = 50,
+                    hyper_params = hyper_params,
+                    search_criteria = search_criteria, 
+                    seed = 1)
+```
+
+Mô hình AUC cao nhất: 
+```{r}
+dl_auc <- h2o.getGrid(grid_id = "dl_grid", 
+                      sort_by = "auc", 
+                      decreasing = TRUE)
+print(dl_auc)
+
+# mô hình DL tốt nhất: 
+best_dl_model_id <- dl_gridperf@model_ids[[1]]
+best_dl <- h2o.getModel(best_dl_model_id)
+```
+
+Thẩm định và thấy model tinh chỉnh này có vẻ ngon về mặt lợi nhuận: 
+
+```{r}
+lapply(seq(0.1, 0.6, by = 0.05), 
+       function(x) {my_confusion_matrix(best_dl, test, x)})
+
+
+my_confusion_matrix(best_dl, test, 0.1)
+my_confusion_matrix(dl_fit2, test, 0.1)
+```
+
